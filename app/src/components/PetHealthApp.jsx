@@ -1,10 +1,42 @@
 import React, { useState } from 'react';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
+import { supabase, supabaseConfigurado, SUPABASE_BUCKET } from '../services/supabase';
+
+// Converte a imagem capturada (URI/webPath do Capacitor) em um File,
+// formato aceito pelo Supabase Storage.
+async function uriParaFile(webPath, formato = 'jpeg') {
+  const resposta = await fetch(webPath);
+  const blob = await resposta.blob();
+  const extensao = formato === 'jpg' ? 'jpeg' : formato;
+  const tipo = blob.type || `image/${extensao}`;
+  const nomeArquivo = `pet-${Date.now()}.${formato}`;
+  return new File([blob], nomeArquivo, { type: tipo });
+}
+
+// Envia o arquivo ao bucket e devolve a URL pública da imagem.
+async function enviarFotoSupabase(file) {
+  if (!supabaseConfigurado) {
+    throw new Error('Supabase não configurado. Crie o arquivo .env (veja .env.example).');
+  }
+
+  const caminho = `pets/${file.name}`;
+
+  const { error } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .upload(caminho, file, { contentType: file.type, upsert: false });
+
+  if (error) throw error;
+
+  const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(caminho);
+  return data.publicUrl;
+}
 
 export default function PetHealthApp() {
   const [fotoPet, setFotoPet] = useState(null);
   const [statusMsg, setStatusMsg] = useState('');
   const [statusTipo, setStatusTipo] = useState(''); // 'ok', 'erro', 'aviso'
+  const [enviando, setEnviando] = useState(false);
+  const [urlPublica, setUrlPublica] = useState('');
 
   // ===== Função principal: captura de foto com tratamento de exceção =====
   const capturarPet = async () => {
@@ -39,13 +71,25 @@ export default function PetHealthApp() {
         promptLabelCancel: 'Cancelar'
       });
 
-      // 3. Renderizar a imagem capturada no estado do React
+      // 3. Mostrar a prévia local imediatamente
       setFotoPet(image.webPath);
-      setStatusMsg('✅ Foto do pet atualizada com sucesso!');
+      setUrlPublica('');
+      setEnviando(true);
+      setStatusMsg('⏳ Enviando foto para a nuvem...');
+      setStatusTipo('aviso');
+
+      // 4. Converter para File e fazer upload no Supabase Storage
+      const file = await uriParaFile(image.webPath, image.format || 'jpeg');
+      const url = await enviarFotoSupabase(file);
+
+      // 5. Renderizar a imagem a partir da URL pública da nuvem
+      setFotoPet(url);
+      setUrlPublica(url);
+      setStatusMsg('✅ Foto enviada para o Supabase com sucesso!');
       setStatusTipo('ok');
 
     } catch (error) {
-      // 4. TRATAMENTO DE EXCEÇÃO — captura cancelamento e erros
+      // 6. TRATAMENTO DE EXCEÇÃO — captura cancelamento e erros
       const msg = String((error && error.message) || error);
 
       if (/cancel/i.test(msg) || /User cancelled/i.test(msg)) {
@@ -54,10 +98,12 @@ export default function PetHealthApp() {
         setStatusTipo('aviso');
       } else {
         // Outro erro inesperado
-        setStatusMsg('❌ Erro ao acessar a câmera: ' + msg);
+        setStatusMsg('❌ Erro ao capturar/enviar a foto: ' + msg);
         setStatusTipo('erro');
       }
       console.warn('Camera.getPhoto error:', error);
+    } finally {
+      setEnviando(false);
     }
   };
 
@@ -88,9 +134,15 @@ export default function PetHealthApp() {
         </div>
 
         {/* ===== Botão para capturar foto ===== */}
-        <button onClick={capturarPet} style={styles.captureButton}>
+        <button
+          onClick={capturarPet}
+          disabled={enviando}
+          style={{ ...styles.captureButton, opacity: enviando ? 0.6 : 1 }}
+        >
           <span style={styles.btnIcon}>📷</span>
-          {fotoPet ? 'Trocar Foto do Pet' : 'Selecionar Foto do Pet'}
+          {enviando
+            ? 'Enviando...'
+            : fotoPet ? 'Trocar Foto do Pet' : 'Selecionar Foto do Pet'}
         </button>
       </div>
 
@@ -126,9 +178,17 @@ export default function PetHealthApp() {
             backgroundColor: fotoPet ? '#dcfce7' : '#fde8e6',
             color: fotoPet ? '#166534' : '#991b1b'
           }}>
-            {fotoPet ? '✓ Foto cadastrada' : '✗ Sem foto'}
+            {urlPublica ? '✓ Salva na nuvem' : fotoPet ? '… Enviando' : '✗ Sem foto'}
           </span>
         </div>
+        {urlPublica && (
+          <div style={styles.infoRow}>
+            <span style={styles.label}>URL pública:</span>
+            <a href={urlPublica} target="_blank" rel="noreferrer" style={styles.link}>
+              Abrir imagem
+            </a>
+          </div>
+        )}
       </div>
 
       {/* ===== Requisitos técnicos demonstrados ===== */}
@@ -141,6 +201,8 @@ export default function PetHealthApp() {
           <li>✅ allowEditing: true</li>
           <li>✅ Renderização condicional com useState</li>
           <li>✅ Tratamento de exceção (try/catch)</li>
+          <li>✅ Conversão URI → File e upload no Supabase Storage</li>
+          <li>✅ URL pública da imagem renderizada na tela</li>
         </ul>
       </div>
     </div>
@@ -277,6 +339,11 @@ const styles = {
     fontSize: '14px',
     fontWeight: '700',
     color: '#0f172a',
+  },
+  link: {
+    fontSize: '14px',
+    fontWeight: '700',
+    color: '#dc2626',
   },
   badge: {
     fontSize: '12px',
